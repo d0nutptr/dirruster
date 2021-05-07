@@ -8,9 +8,12 @@ use std::path::Path;
 use ansi_term::Colour::Fixed;
 use indicatif::ProgressBar;
 use console::Term;
+use futures::StreamExt;
+use futures::future::ok;
 
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = App::new("dirruster")
         .version("0.1")
         .about("Project about learning how to write a directory bruteforcer in Rust")
@@ -60,25 +63,29 @@ fn main() {
     let mut urls: Vec<String> = Vec::new();
     let file = File::open(wordlist).expect("Failed to open file");
     let file = BufReader::new(file);
-    for i in file.lines() {
-        // Look this up noob
-        if let Ok(s) = i {
-            urls.push(s);
-        }
-    }
-    let bar = ProgressBar::new(1000);
-    // Making the request
-    for path in urls {
 
-        let target = format!("{}/{}{}", &target_host, &path, &ext);
+    probe(file, &target_host, &ext).await;
+}
 
-        if let Err(err) = request(&target, &user_agent, &term, &out_file) {
-            println!("Error with {} | {}\n", &target, err);
-        }
-        bar.inc(1);
-        let _ = term.move_cursor_up(1);
-        //let _ = term.clear_line();
-    }
+async fn probe (file: BufReader<File>,target_host: &str,ext: &str) {
+    let requests = file.lines() // Result<String, Error>
+        .filter_map(|line_result| line_result.ok()) // Stromg
+        .map(|line| format!("{}/{}{}", &target_host, line, ext)) // String
+        .filter_map(|fetch| Request::head(fetch).body(()).ok()); // Request
+
+    futures::stream::iter(requests) // Stream of Request
+        .map(|request| request.send_async()) // SendFuture
+        .buffer_unordered(256) // Response
+        .filter_map(|response| async { response.ok() })
+        .for_each(|response| {
+            let uri = response.effective_uri()
+                .map(|uri| uri.to_string())
+                .unwrap_or("".to_string());
+
+            println!("[{}] {:?}", response.status().as_u16(), uri);
+
+            futures::future::ready(())
+        }).await;
 }
 
 fn request(t: &str, ua: &str,term: &Term, mut out_file: &File) -> Result<(), isahc::Error> {
